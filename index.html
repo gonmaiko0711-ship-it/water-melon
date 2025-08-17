@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>スイカ割りゲーム 🍉</title>
+<meta name="theme-color" content="#0f172a">
+<style>
+  :root{
+    --bg:#0b1220; --panel:#0f172a; --ink:#e5e7eb; --muted:#9ca3af; --accent:#22c55e;
+  }
+  html,body{height:100%}
+  body{margin:0; background: radial-gradient(1200px 800px at 20% -10%, #132a59, transparent 60%), var(--bg);
+    color:var(--ink); font-family: "Hiragino Kaku Gothic ProN","Yu Gothic","Noto Sans JP", system-ui, -apple-system, sans-serif;}
+  .wrap{max-width:980px; margin:0 auto; padding:16px 12px 100px;}
+  header{display:flex; align-items:center; gap:12px; margin-bottom:8px;}
+  .logo{width:60px;height:60px;border-radius:16px;display:grid;place-items:center;background:linear-gradient(135deg,#34d399,#22c55e);box-shadow:0 8px 24px rgba(0,0,0,.25);font-size:28px}
+  h1{margin:0;font-size:clamp(20px,4vw,28px)}
+  .sub{color:var(--muted);font-size:13px}
+  .hud{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}
+  .pill{background:#0b1220;border:1px solid #223a66;border-radius:999px;padding:8px 12px;font-weight:800}
+  .btn{background:#22c55e;color:#052e16;border:none;border-radius:14px;padding:10px 14px;font-size:18px;font-weight:900;cursor:pointer}
+  .btn-sec{background:#0b1220;border:1px solid #22c55e;color:#22c55e;border-radius:12px;padding:8px 12px;font-size:16px}
+  .canvas-wrap{position:relative;background:#061227;border:1px solid #1e2b46;border-radius:16px;overflow:hidden}
+  #game{width:100%;aspect-ratio:16/9;display:block}
+  .swing-btn{position:sticky;bottom:0;left:0;right:0;background:#020617;border-top:1px solid #1f2937;padding:12px;display:flex;gap:10px;justify-content:center}
+  .big{font-size:26px;padding:16px 24px;border-radius:18px}
+  .note{color:#9ca3af;font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🥢</div>
+    <div>
+      <h1>スイカ割りゲーム</h1>
+      <div class="sub">タップでふりおろし！ 金のスイカはポイントアップ、くさったスイカは減点！</div>
+    </div>
+  </header>
+
+  <div class="hud">
+    <div class="pill">⏱️ <span id="time">60</span>s</div>
+    <div class="pill">⭐ スコア: <span id="score">0</span></div>
+    <div class="pill">🍉 +1 / 🟡 +5 / 🤢 -3</div>
+    <button id="start" class="btn">▶︎ スタート / リスタート</button>
+    <button id="pause" class="btn-sec">⏸ 一時停止</button>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="game" width="960" height="540" aria-label="game"></canvas>
+  </div>
+
+  <div class="swing-btn">
+    <button id="swing" class="btn big">🥢 ふりおろす！ (Space)</button>
+  </div>
+
+  <div class="note">※iPad/PC対応。Safariで開いて「ホーム画面に追加」するとアプリ風に遊べるよ。</div>
+</div>
+
+<script>
+/* ====== 簡単設定（数字を変えるだけで調整OK） ====== */
+const CONFIG = {
+  duration: 60,         // ゲーム時間(秒)
+  spawnMin: 450,        // スイカ出現最短(ms)
+  spawnMax: 1600,       // スイカ出現最長(ms)
+  baseSpeed: 120,       // スイカの基本速度(px/秒)
+  goldenChance: 0.12,   // 金スイカの確率
+  rottenChance: 0.15,   // くさりスイカの確率
+  stickCooldown: 400,   // 連続スイングのクールダウン(ms)
+  hitWindowMs: 140,     // 当たり判定の猶予(ms)
+  scores: { normal: 1, golden: 5, rotten: -3 }
+};
+
+/* ====== 変数 ====== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const ui = {
+  score: document.getElementById('score'),
+  time: document.getElementById('time'),
+  start: document.getElementById('start'),
+  pause: document.getElementById('pause'),
+  swing: document.getElementById('swing')
+};
+
+let state = {
+  running: false,
+  paused: false,
+  tLeft: CONFIG.duration,
+  score: 0,
+  lastTime: 0,
+  entities: [],
+  nextSpawn: 0,
+  swinging: false,
+  lastSwingTime: -99999
+};
+
+function reset(){
+  state.running=false;
+  state.paused=false;
+  state.tLeft=CONFIG.duration;
+  state.score=0;
+  state.entities=[];
+  state.nextSpawn=0;
+  state.swinging=false;
+  ui.score.textContent=0;
+  ui.time.textContent=CONFIG.duration;
+  drawTitle();
+}
+
+function start(){
+  state.running=true;
+  state.paused=false;
+  state.lastTime=performance.now();
+  requestAnimationFrame(loop);
+}
+
+function pauseToggle(){
+  state.paused = !state.paused;
+  ui.pause.textContent = state.paused ? "▶︎ 再開" : "⏸ 一時停止";
+  if(!state.paused){
+    state.lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+}
+
+function rand(a,b){ return a + Math.random()*(b-a); }
+function chance(p){ return Math.random() < p; }
+
+function spawn(){
+  const yBase = canvas.height*0.6;
+  const vy = rand(-30, 30);
+  let type = "normal";
+  const r = Math.random();
+  if(r < CONFIG.goldenChance) type = "golden";
+  else if(r < CONFIG.goldenChance + CONFIG.rottenChance) type = "rotten";
+  const scale = rand(0.8, 1.2);
+  const speed = CONFIG.baseSpeed * rand(0.8,1.8) * (type==="golden"?1.2:1) * (type==="rotten"?0.9:1);
+  const dir = chance(0.5) ? 1 : -1; // 左→右 or 右→左
+  const x = dir===1 ? -60 : canvas.width+60;
+  const y = yBase + rand(-40,40);
+  const rot = rand(-0.05, 0.05);
+  state.entities.push({
+    kind: "melon",
+    type, x, y, r: 28*scale, vx: speed*dir, vy, rot, angle: 0, alive: true, hit:false
+  });
+  state.nextSpawn = performance.now() + rand(CONFIG.spawnMin, CONFIG.spawnMax);
+}
+
+function swing(){
+  const now = performance.now();
+  if(now - state.lastSwingTime < CONFIG.stickCooldown) return; // 連打制限
+  state.lastSwingTime = now;
+  state.swinging = true;
+  setTimeout(()=> state.swinging=false, CONFIG.hitWindowMs);
+  // ヒット判定（画面中央下の扇形）
+  const cx = canvas.width*0.5, cy = canvas.height*0.78;
+  const range = canvas.height*0.28;
+  state.entities.forEach(e=>{
+    if(!e.alive || e.hit) return;
+    const dx = e.x - cx, dy = e.y - cy;
+    const dist = Math.hypot(dx,dy);
+    if(dist < range && e.y > canvas.height*0.45){
+      e.hit = true; e.alive=false;
+      const add = e.type==="golden"?CONFIG.scores.golden : e.type==="rotten"?CONFIG.scores.rotten : CONFIG.scores.normal;
+      state.score += add;
+      ui.score.textContent = state.score;
+      makePop(e.x, e.y, e.type);
+    }
+  });
+}
+
+const particles = [];
+function makePop(x,y,type){
+  const color = type==="golden" ? "#f7c948" : type==="rotten" ? "#7c7c54" : "#2dd36f";
+  for(let i=0;i<16;i++){
+    particles.push({x,y, vx:rand(-120,120), vy:rand(-180, -60), life: rand(0.4,0.8), t:0, color});
+  }
+}
+
+function update(dt){
+  state.tLeft -= dt;
+  if(state.tLeft < 0){ state.tLeft = 0; state.running=false; }
+  ui.time.textContent = Math.ceil(state.tLeft);
+
+  if(performance.now() > state.nextSpawn){ spawn(); }
+
+  state.entities.forEach(e=>{
+    e.x += e.vx*dt;
+    e.y += e.vy*dt;
+    e.angle += e.rot;
+  });
+  state.entities = state.entities.filter(e=>
+    e.alive && e.x>-120 && e.x<canvas.width+120 && e.y>-120 && e.y<canvas.height+120
+  );
+
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i]; p.t += dt;
+    p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 600*dt;
+    if(p.t > p.life) particles.splice(i,1);
+  }
+}
+
+function drawBg(){
+  ctx.fillStyle = "#03122a";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  const h = canvas.height*0.25;
+  ctx.fillStyle = "#06264c";
+  ctx.fillRect(0, canvas.height - h, canvas.width, h);
+  ctx.strokeStyle = "rgba(255,255,255,.05)";
+  ctx.lineWidth = 2;
+  for(let i=0;i<4;i++){
+    ctx.beginPath();
+    const y = canvas.height - h + i*18 + 10;
+    for(let x=0;x<=canvas.width;x+=24){
+      ctx.lineTo(x, y + Math.sin((x+i*60)/40)*4);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawStick(){
+  const cx = canvas.width*0.5, cy = canvas.height*0.78;
+  ctx.save();
+  ctx.translate(cx, cy);
+  const a = state.swinging? -1.2 : -0.2;
+  ctx.rotate(a);
+  ctx.fillStyle="#d4b48c";
+  ctx.fillRect(0,-10,160,20);
+  ctx.fillStyle="#a97c50";
+  ctx.fillRect(-18,-12,36,24);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 0.08;
+  ctx.beginPath();
+  ctx.fillStyle = "#22c55e";
+  ctx.moveTo(cx,cy);
+  ctx.arc(cx,cy, canvas.height*0.28, 0.2*Math.PI, 1.5*Math.PI);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawMelon(e){
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.rotate(e.angle);
+  if(e.type==="golden"){
+    const g = ctx.createLinearGradient(-e.r,-e.r,e.r,e.r);
+    g.addColorStop(0,"#fff3bf"); g.addColorStop(1,"#f7b500");
+    ctx.fillStyle = g;
+  }else if(e.type==="rotten"){
+    ctx.fillStyle = "#7a7a52";
+  }else{
+    ctx.fillStyle = "#1bb76e";
+  }
+  ctx.beginPath(); ctx.arc(0,0,e.r,0,Math.PI*2); ctx.fill();
+  if(e.type!=="golden"){
+    ctx.strokeStyle = e.type==="rotten" ? "#5f5f3a" : "#0d5d3e";
+    ctx.lineWidth = 6;
+    for(let i=-2;i<=2;i++){
+      ctx.beginPath(); ctx.ellipse(0,0,e.r*(1-0.12*Math.abs(i)), e.r, i*0.4, 0, Math.PI*2); ctx.stroke();
+    }
+  }
+  ctx.fillStyle = "rgba(255,255,255,.2)";
+  ctx.beginPath(); ctx.ellipse(-e.r*0.3,-e.r*0.3, e.r*0.25, e.r*0.15, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = "#704214";
+  ctx.fillRect(-4,-e.r-6,8,12);
+  ctx.restore();
+}
+
+function drawParticles(){
+  particles.forEach(p=>{
+    ctx.globalAlpha = Math.max(0,1 - p.t/p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 6, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+}
+
+function drawTitle(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawBg();
+  drawStick();
+  ctx.fillStyle="#e5e7eb"; ctx.textAlign="center";
+  ctx.font="700 42px system-ui, -apple-system, 'Noto Sans JP', sans-serif";
+  ctx.fillText("スイカ割りゲーム", canvas.width/2, canvas.height/2 - 20);
+  ctx.font="20px system-ui, -apple-system"; ctx.fillStyle="#9ca3af";
+  ctx.fillText("▶︎ スタート を押してね（Space でもOK）", canvas.width/2, canvas.height/2 + 16);
+}
+
+function loop(now){
+  if(!state.running || state.paused) return;
+  const dt = Math.min(0.05, (now - state.lastTime)/1000);
+  state.lastTime = now;
+  update(dt);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawBg();
+  state.entities.forEach(drawMelon);
+  drawParticles();
+  drawStick();
+
+  if(state.tLeft > 0){
+    requestAnimationFrame(loop);
+  }else{
+    ctx.fillStyle="#e5e7eb";
+    ctx.textAlign="center";
+    ctx.font="700 40px system-ui, -apple-system, 'Noto Sans JP'"; 
+    ctx.fillText("おしまい！ スコア: "+state.score, canvas.width/2, canvas.height/2);
+    ctx.font="18px system-ui, -apple-system"; 
+    ctx.fillStyle="#9ca3af";
+    ctx.fillText("▶︎ スタート で もう一回", canvas.width/2, canvas.height/2 + 30);
+  }
+}
+
+/* ====== イベント ====== */
+ui.start.addEventListener('click', ()=>{ reset(); start(); });
+ui.pause.addEventListener('click', pauseToggle);
+ui.swing.addEventListener('click', ()=>{ if(state.running && !state.paused) swing(); });
+
+window.addEventListener('keydown', (e)=>{
+  if(e.code === 'Space'){ e.preventDefault(); swing(); }
+  if(e.code === 'Enter' && !state.running){ reset(); start(); }
+  if(e.code === 'KeyP'){ pauseToggle(); }
+});
+
+// 初期描画
+reset();
+</script>
+</body>
+</html>
